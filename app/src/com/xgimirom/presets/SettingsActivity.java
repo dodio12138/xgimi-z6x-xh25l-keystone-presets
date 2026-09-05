@@ -14,6 +14,7 @@ import android.view.Gravity;
 import android.view.View;
 import android.view.ViewGroup;
 import android.view.WindowManager;
+import android.view.inputmethod.EditorInfo;
 import android.view.inputmethod.InputMethodManager;
 import android.widget.Button;
 import android.widget.EditText;
@@ -38,9 +39,13 @@ public final class SettingsActivity extends Activity {
     private static final int COLOR_MUTED = Color.rgb(153, 164, 181);
 
     private final TextView[] nameValueViews = new TextView[SLOT_COUNT];
+    private final Button[] editButtons = new Button[SLOT_COUNT];
+    private final View[] confirmationCards = new View[2];
     private SharedPreferences preferences;
     private Switch saveConfirmationSwitch;
     private Switch applyConfirmationSwitch;
+    private Button backButton;
+    private Button resetButton;
 
     static String slotNameKey(int slot) {
         return "slot." + slot + ".name";
@@ -51,6 +56,8 @@ public final class SettingsActivity extends Activity {
         super.onCreate(savedInstanceState);
         preferences = getSharedPreferences(PREFS_NAME, MODE_PRIVATE);
         setContentView(buildContentView());
+        configureFocusNavigation();
+        backButton.requestFocus();
     }
 
     @Override
@@ -69,14 +76,14 @@ public final class SettingsActivity extends Activity {
         header.setGravity(Gravity.CENTER_VERTICAL);
         root.addView(header, matchWrap());
 
-        Button back = makeButton("返回", false);
-        back.setOnClickListener(new View.OnClickListener() {
+        backButton = makeButton("返回", false);
+        backButton.setOnClickListener(new View.OnClickListener() {
             @Override
             public void onClick(View view) {
                 finish();
             }
         });
-        header.addView(back, new LinearLayout.LayoutParams(dp(104), dp(48)));
+        header.addView(backButton, new LinearLayout.LayoutParams(dp(104), dp(48)));
 
         LinearLayout titles = new LinearLayout(this);
         titles.setOrientation(LinearLayout.VERTICAL);
@@ -90,7 +97,7 @@ public final class SettingsActivity extends Activity {
         titles.addView(title);
         titles.addView(makeText("名称与操作确认", 13, COLOR_MUTED), topMargin(dp(3)));
 
-        TextView version = makeText("v0.9.1", 14, Color.rgb(192, 211, 255));
+        TextView version = makeText("v0.10.0", 14, Color.rgb(192, 211, 255));
         version.setGravity(Gravity.CENTER);
         version.setPadding(dp(16), dp(8), dp(16), dp(8));
         version.setBackground(roundRect(Color.rgb(34, 52, 82), dp(18), 0, 0));
@@ -140,8 +147,8 @@ public final class SettingsActivity extends Activity {
             }
         }
 
-        Button reset = makeButton("恢复默认设置", false);
-        reset.setOnClickListener(new View.OnClickListener() {
+        resetButton = makeButton("恢复默认设置", false);
+        resetButton.setOnClickListener(new View.OnClickListener() {
             @Override
             public void onClick(View view) {
                 confirmReset();
@@ -149,15 +156,14 @@ public final class SettingsActivity extends Activity {
         });
         LinearLayout.LayoutParams resetParams = new LinearLayout.LayoutParams(dp(192), dp(48));
         resetParams.topMargin = dp(16);
-        content.addView(reset, resetParams);
-
-        back.requestFocus();
+        content.addView(resetButton, resetParams);
         return root;
     }
 
     private View buildToggleCard(String title, String summary, final String key,
             boolean saveToggle) {
         final LinearLayout card = new LinearLayout(this);
+        card.setId(View.generateViewId());
         card.setOrientation(LinearLayout.HORIZONTAL);
         card.setGravity(Gravity.CENTER_VERTICAL);
         card.setPadding(dp(20), dp(12), dp(20), dp(12));
@@ -184,15 +190,25 @@ public final class SettingsActivity extends Activity {
         toggle.setTextOff("关闭");
         toggle.setFocusable(false);
         toggle.setClickable(false);
+        boolean initialChecked = preferences.getBoolean(key, true);
+        toggle.setChecked(initialChecked);
         toggle.setOnCheckedChangeListener((button, checked) ->
-                preferences.edit().putBoolean(key, checked).apply());
+                {
+                    preferences.edit().putBoolean(key, checked).apply();
+                    card.setContentDescription(title + "，" + (checked ? "开启" : "关闭")
+                            + "。" + summary);
+                });
         card.addView(toggle, new LinearLayout.LayoutParams(dp(80), dp(48)));
         card.setOnClickListener(view -> toggle.setChecked(!toggle.isChecked()));
         if (saveToggle) {
             saveConfirmationSwitch = toggle;
+            confirmationCards[0] = card;
         } else {
             applyConfirmationSwitch = toggle;
+            confirmationCards[1] = card;
         }
+        card.setContentDescription(title + "，" + (initialChecked ? "开启" : "关闭")
+                + "。" + summary);
         return card;
     }
 
@@ -228,6 +244,7 @@ public final class SettingsActivity extends Activity {
             }
         });
         card.addView(edit, new LinearLayout.LayoutParams(dp(80), dp(44)));
+        editButtons[slot - 1] = edit;
         return card;
     }
 
@@ -238,6 +255,7 @@ public final class SettingsActivity extends Activity {
         input.setSelectAllOnFocus(true);
         input.setHint(defaultName(slot));
         input.setFilters(new InputFilter[]{new InputFilter.LengthFilter(14)});
+        input.setImeOptions(EditorInfo.IME_ACTION_DONE);
         input.setPadding(dp(20), dp(8), dp(20), dp(8));
 
         LinearLayout holder = new LinearLayout(this);
@@ -265,6 +283,13 @@ public final class SettingsActivity extends Activity {
                 dialog.dismiss();
                 Toast.makeText(this, "名称已更新", Toast.LENGTH_SHORT).show();
             });
+            input.setOnEditorActionListener((view, actionId, event) -> {
+                if (actionId == EditorInfo.IME_ACTION_DONE) {
+                    dialog.getButton(AlertDialog.BUTTON_POSITIVE).performClick();
+                    return true;
+                }
+                return false;
+            });
             input.requestFocus();
             dialog.getWindow().setSoftInputMode(
                     WindowManager.LayoutParams.SOFT_INPUT_STATE_ALWAYS_VISIBLE);
@@ -274,17 +299,21 @@ public final class SettingsActivity extends Activity {
                 keyboard.showSoftInput(input, InputMethodManager.SHOW_IMPLICIT);
             }
         });
+        dialog.setOnDismissListener(ignored -> editButtons[slot - 1].requestFocus());
         dialog.show();
     }
 
     private void confirmReset() {
-        new AlertDialog.Builder(this)
+        final AlertDialog dialog = new AlertDialog.Builder(this)
                 .setTitle("恢复默认设置？")
                 .setMessage("六个预设名称将恢复默认，保存和应用确认将重新开启。"
                         + " 已保存的校正数据不会删除。")
                 .setNegativeButton("取消", null)
-                .setPositiveButton("恢复默认", (dialog, which) -> resetSettings())
-                .show();
+                .setPositiveButton("恢复默认", (shown, which) -> resetSettings())
+                .create();
+        dialog.setOnShowListener(ignored ->
+                dialog.getButton(AlertDialog.BUTTON_NEGATIVE).requestFocus());
+        dialog.show();
     }
 
     private void resetSettings() {
@@ -297,6 +326,38 @@ public final class SettingsActivity extends Activity {
         editor.apply();
         refreshSettings();
         Toast.makeText(this, "已恢复默认设置", Toast.LENGTH_SHORT).show();
+    }
+
+    private void configureFocusNavigation() {
+        backButton.setNextFocusDownId(confirmationCards[0].getId());
+        confirmationCards[0].setNextFocusLeftId(confirmationCards[0].getId());
+        confirmationCards[0].setNextFocusRightId(confirmationCards[1].getId());
+        confirmationCards[0].setNextFocusUpId(backButton.getId());
+        confirmationCards[0].setNextFocusDownId(editButtons[0].getId());
+        confirmationCards[1].setNextFocusLeftId(confirmationCards[0].getId());
+        confirmationCards[1].setNextFocusRightId(confirmationCards[1].getId());
+        confirmationCards[1].setNextFocusUpId(backButton.getId());
+        confirmationCards[1].setNextFocusDownId(editButtons[2].getId());
+
+        for (int index = 0; index < SLOT_COUNT; index++) {
+            int row = index / COLUMNS;
+            int column = index % COLUMNS;
+            Button edit = editButtons[index];
+            edit.setNextFocusLeftId(editButtons[column == 0 ? index : index - 1].getId());
+            edit.setNextFocusRightId(
+                    editButtons[column == COLUMNS - 1 ? index : index + 1].getId());
+            if (row == 0) {
+                edit.setNextFocusUpId(confirmationCards[column < 2 ? 0 : 1].getId());
+                edit.setNextFocusDownId(editButtons[index + COLUMNS].getId());
+            } else {
+                edit.setNextFocusUpId(editButtons[index - COLUMNS].getId());
+                edit.setNextFocusDownId(resetButton.getId());
+            }
+        }
+        resetButton.setNextFocusUpId(editButtons[3].getId());
+        resetButton.setNextFocusDownId(resetButton.getId());
+        resetButton.setNextFocusLeftId(resetButton.getId());
+        resetButton.setNextFocusRightId(resetButton.getId());
     }
 
     private void refreshSettings() {

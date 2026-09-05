@@ -33,7 +33,17 @@ final class GmpfKeystoneBridge {
             Api api = new Api();
             Object coordinates = api.newFullCoordinates((byte) 0);
             api.readMethod.invoke(api.manager, coordinates);
-            return encode(api, coordinates);
+            boolean valid = ((Boolean) api.checkMethod.invoke(api.manager, coordinates))
+                    .booleanValue();
+            if (!valid) {
+                throw new IllegalStateException("当前校正坐标未通过系统校验");
+            }
+            String serialized = encode(api, coordinates);
+            String validationError = KeystoneDataValidator.validate(serialized);
+            if (validationError != null) {
+                throw new IllegalStateException(validationError);
+            }
+            return serialized;
         } catch (InvocationTargetException error) {
             throw nativeFailure(error);
         } catch (ReflectiveOperationException error) {
@@ -103,19 +113,12 @@ final class GmpfKeystoneBridge {
     }
 
     private Object decode(Api api, String value) throws ReflectiveOperationException {
-        if (value == null || value.length() == 0) {
-            throw new IllegalArgumentException("此槽位没有可用的校正数据");
+        String validationError = KeystoneDataValidator.validate(value);
+        if (validationError != null) {
+            throw new IllegalArgumentException(validationError);
         }
         String[] fields = value.split(",", -1);
-        int expected = 1 + GRID * GRID * 2;
-        if (fields.length != expected) {
-            throw new IllegalArgumentException(
-                    "校正数据字段数量错误：需要 " + expected + "，实际 " + fields.length);
-        }
         int mode = parse(fields[0], "模式");
-        if (mode < 0 || mode > 5) {
-            throw new IllegalArgumentException("不支持的校正模式: " + mode);
-        }
         Object full = api.newFullCoordinates((byte) mode);
         Object rows = api.coordinatesField.get(full);
         int index = 1;
@@ -125,10 +128,6 @@ final class GmpfKeystoneBridge {
                 Object point = Array.get(columns, column);
                 int x = parse(fields[index++], "x");
                 int y = parse(fields[index++], "y");
-                if (x < Short.MIN_VALUE || x > Short.MAX_VALUE
-                        || y < Short.MIN_VALUE || y > Short.MAX_VALUE) {
-                    throw new IllegalArgumentException("校正坐标超出有效范围");
-                }
                 api.xField.setShort(point, (short) x);
                 api.yField.setShort(point, (short) y);
             }
@@ -181,15 +180,7 @@ final class GmpfKeystoneBridge {
     }
 
     private int[] activeSize(byte mode) {
-        switch (mode) {
-            case 0: return new int[]{2, 2};
-            case 1: return new int[]{3, 3};
-            case 2: return new int[]{3, 5};
-            case 3: return new int[]{5, 3};
-            case 4: return new int[]{5, 5};
-            case 5: return new int[]{9, 9};
-            default: throw new IllegalArgumentException("不支持的校正模式: " + mode);
-        }
+        return KeystoneDataValidator.activeSize((int) mode);
     }
 
     private int parse(String value, String label) {

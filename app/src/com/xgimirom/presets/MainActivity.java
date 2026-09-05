@@ -1,6 +1,7 @@
 package com.xgimirom.presets;
 
 import android.app.Activity;
+import android.app.AlertDialog;
 import android.app.Dialog;
 import android.content.Intent;
 import android.content.SharedPreferences;
@@ -10,8 +11,12 @@ import android.graphics.Typeface;
 import android.graphics.drawable.ColorDrawable;
 import android.graphics.drawable.GradientDrawable;
 import android.graphics.drawable.StateListDrawable;
+import android.os.Build;
 import android.os.Bundle;
+import android.os.Handler;
+import android.os.Looper;
 import android.os.RemoteException;
+import android.text.TextUtils;
 import android.view.Gravity;
 import android.view.View;
 import android.view.ViewGroup;
@@ -23,13 +28,19 @@ import android.widget.TextView;
 import android.widget.Toast;
 import java.text.SimpleDateFormat;
 import java.util.Date;
+import java.util.LinkedHashMap;
 import java.util.Locale;
+import java.util.Map;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 
 public final class MainActivity extends Activity
         implements XgimiEnvironmentBridge.Listener {
     private static final String PREFS_NAME = "keystone_presets";
     private static final int SLOT_COUNT = 6;
     private static final int COLUMNS = 3;
+    private static final long CONNECTION_TIMEOUT_MS = 5000L;
+    private static final String PREF_COMPATIBILITY_ACK = "device.compatibility_ack";
     private static final int COLOR_BG_TOP = Color.rgb(13, 17, 24);
     private static final int COLOR_BG_BOTTOM = Color.rgb(21, 27, 38);
     private static final int COLOR_CARD = Color.rgb(29, 36, 48);
@@ -57,7 +68,23 @@ public final class MainActivity extends Activity
     private SharedPreferences preferences;
     private TextView statusView;
     private Button settingsButton;
+    private Button retryButton;
+    private final Handler mainHandler = new Handler(Looper.getMainLooper());
+    private final ExecutorService hardwareExecutor = Executors.newSingleThreadExecutor();
     private boolean serviceConnected;
+    private boolean operationRunning;
+    private boolean activityStarted;
+    private boolean disconnectWhenIdle;
+    private boolean destroyed;
+    private final Runnable connectionTimeout = new Runnable() {
+        @Override
+        public void run() {
+            if (activityStarted && !serviceConnected && !operationRunning) {
+                bridge.disconnect();
+                showConnectionState(false, "连接超时，请重试");
+            }
+        }
+    };
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -68,13 +95,15 @@ public final class MainActivity extends Activity
         configureFocusNavigation();
         refreshAllSlots();
         setActionsEnabled(false);
+        showCompatibilityWarningIfNeeded();
     }
 
     @Override
     protected void onStart() {
         super.onStart();
-        setStatus("●  正在连接极米显示服务…", COLOR_BLUE);
-        bridge.connect();
+        activityStarted = true;
+        disconnectWhenIdle = false;
+        beginConnect();
     }
 
     @Override
@@ -88,9 +117,26 @@ public final class MainActivity extends Activity
 
     @Override
     protected void onStop() {
-        bridge.disconnect();
+        activityStarted = false;
+        mainHandler.removeCallbacks(connectionTimeout);
+        if (operationRunning) {
+            disconnectWhenIdle = true;
+        } else {
+            bridge.disconnect();
+        }
         serviceConnected = false;
         super.onStop();
+    }
+
+    @Override
+    protected void onDestroy() {
+        destroyed = true;
+        mainHandler.removeCallbacksAndMessages(null);
+        hardwareExecutor.shutdown();
+        if (!operationRunning) {
+            bridge.close();
+        }
+        super.onDestroy();
     }
 
     @Override
@@ -98,11 +144,8 @@ public final class MainActivity extends Activity
         runOnUiThread(new Runnable() {
             @Override
             public void run() {
-                serviceConnected = connected;
-                setStatus(
-                        connected ? "●  设备已连接，可以保存或应用预设" : "●  " + message,
-                        connected ? COLOR_GREEN : Color.rgb(255, 112, 112));
-                setActionsEnabled(connected);
+                mainHandler.removeCallbacks(connectionTimeout);
+                showConnectionState(connected, message);
                 if (connected && actionButtons[0] != null) {
                     actionButtons[0].requestFocus();
                 }
@@ -130,10 +173,13 @@ public final class MainActivity extends Activity
         title.setTypeface(Typeface.DEFAULT, Typeface.BOLD);
         titles.addView(title);
 
-        TextView subtitle = makeText("Z6X · XH25L", 14, COLOR_MUTED);
+        TextView subtitle = makeText(
+                DeviceCompatibility.deviceLabel(Build.MODEL, Build.DEVICE)
+                        + " · Android " + Build.VERSION.RELEASE,
+                14, COLOR_MUTED);
         titles.addView(subtitle, topMargin(dp(4)));
 
-        TextView version = makeText("v0.9.1", 14, Color.rgb(192, 211, 255));
+        TextView version = makeText("v0.10.0", 14, Color.rgb(192, 211, 255));
         version.setGravity(Gravity.CENTER);
         version.setPadding(dp(16), dp(8), dp(16), dp(8));
         version.setBackground(roundRect(Color.rgb(34, 52, 82), dp(18), 0, 0));
@@ -151,11 +197,31 @@ public final class MainActivity extends Activity
         settingsParams.setMarginStart(dp(12));
         header.addView(settingsButton, settingsParams);
 
+        LinearLayout statusRow = new LinearLayout(this);
+        statusRow.setOrientation(LinearLayout.HORIZONTAL);
+        statusRow.setGravity(Gravity.CENTER_VERTICAL);
+        root.addView(statusRow, topMargin(dp(16)));
+
         statusView = makeText("●  尚未连接", 16, COLOR_BLUE);
+        statusView.setAccessibilityLiveRegion(View.ACCESSIBILITY_LIVE_REGION_POLITE);
         statusView.setPadding(dp(18), dp(13), dp(18), dp(13));
         statusView.setBackground(roundRect(Color.rgb(25, 34, 47), dp(12),
                 Color.rgb(46, 58, 75), dp(1)));
-        root.addView(statusView, topMargin(dp(16)));
+        statusRow.addView(statusView, new LinearLayout.LayoutParams(
+                0, ViewGroup.LayoutParams.WRAP_CONTENT, 1.0f));
+
+        retryButton = makeButton("重新连接", false);
+        retryButton.setVisibility(View.GONE);
+        retryButton.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View view) {
+                bridge.disconnect();
+                beginConnect();
+            }
+        });
+        LinearLayout.LayoutParams retryParams = new LinearLayout.LayoutParams(dp(140), dp(48));
+        retryParams.setMarginStart(dp(12));
+        statusRow.addView(retryButton, retryParams);
 
         for (int row = 0; row < 2; row++) {
             LinearLayout cardRow = new LinearLayout(this);
@@ -198,6 +264,8 @@ public final class MainActivity extends Activity
 
         TextView label = makeText("预设 " + slot, 20, Color.WHITE);
         label.setTypeface(Typeface.DEFAULT, Typeface.BOLD);
+        label.setSingleLine(true);
+        label.setEllipsize(TextUtils.TruncateAt.END);
         LinearLayout.LayoutParams labelParams = new LinearLayout.LayoutParams(
                 0, ViewGroup.LayoutParams.WRAP_CONTENT, 1.0f);
         labelParams.setMarginStart(dp(12));
@@ -305,36 +373,41 @@ public final class MainActivity extends Activity
 
     private void configureFocusNavigation() {
         if (settingsButton != null && actionButtons[0] != null) {
-            settingsButton.setNextFocusDownId(actionButtons[0].getId());
+            settingsButton.setNextFocusDownId(
+                    retryButton != null && retryButton.getVisibility() == View.VISIBLE
+                            ? retryButton.getId() : actionButtons[0].getId());
+        }
+        if (retryButton != null) {
+            retryButton.setNextFocusUpId(settingsButton.getId());
+            retryButton.setNextFocusDownId(retryButton.getId());
+            retryButton.setNextFocusLeftId(retryButton.getId());
+            retryButton.setNextFocusRightId(retryButton.getId());
+        }
+        boolean[] complete = new boolean[SLOT_COUNT];
+        for (int slotIndex = 0; slotIndex < SLOT_COUNT; slotIndex++) {
+            complete[slotIndex] = hasCompleteSlot(slotIndex + 1);
         }
         for (int slotIndex = 0; slotIndex < SLOT_COUNT; slotIndex++) {
-            Button save = actionButtons[slotIndex * 2];
-            Button restore = actionButtons[slotIndex * 2 + 1];
-            int previousSlot = Math.max(0, slotIndex - 1);
-            int nextSlot = Math.min(SLOT_COUNT - 1, slotIndex + 1);
-            int aboveSlot = slotIndex >= COLUMNS ? slotIndex - COLUMNS : slotIndex;
-            int belowSlot = slotIndex + COLUMNS < SLOT_COUNT
-                    ? slotIndex + COLUMNS : slotIndex;
-
-            Button previousRestore = actionButtons[previousSlot * 2 + 1];
-            Button aboveRestore = actionButtons[aboveSlot * 2 + 1];
-            Button belowRestore = actionButtons[belowSlot * 2 + 1];
-
-            save.setNextFocusLeftId(previousRestore.isEnabled()
-                    ? previousRestore.getId() : actionButtons[previousSlot * 2].getId());
-            save.setNextFocusRightId(restore.isEnabled()
-                    ? restore.getId() : actionButtons[nextSlot * 2].getId());
-            restore.setNextFocusLeftId(save.getId());
-            restore.setNextFocusRightId(actionButtons[nextSlot * 2].getId());
-            save.setNextFocusUpId(slotIndex < COLUMNS && settingsButton != null
-                    ? settingsButton.getId() : actionButtons[aboveSlot * 2].getId());
-            save.setNextFocusDownId(actionButtons[belowSlot * 2].getId());
-            restore.setNextFocusUpId(slotIndex < COLUMNS && settingsButton != null
-                    ? settingsButton.getId() : (aboveRestore.isEnabled()
-                    ? aboveRestore.getId() : actionButtons[aboveSlot * 2].getId()));
-            restore.setNextFocusDownId(belowRestore.isEnabled()
-                    ? belowRestore.getId() : actionButtons[belowSlot * 2].getId());
+            configureButtonFocus(actionButtons[slotIndex * 2], slotIndex, false, complete);
+            configureButtonFocus(actionButtons[slotIndex * 2 + 1], slotIndex, true, complete);
         }
+    }
+
+    private void configureButtonFocus(Button button, int slotIndex, boolean restore,
+            boolean[] complete) {
+        button.setNextFocusLeftId(focusId(MainFocusNavigation.target(
+                slotIndex, restore, MainFocusNavigation.LEFT, complete, COLUMNS)));
+        button.setNextFocusRightId(focusId(MainFocusNavigation.target(
+                slotIndex, restore, MainFocusNavigation.RIGHT, complete, COLUMNS)));
+        button.setNextFocusUpId(focusId(MainFocusNavigation.target(
+                slotIndex, restore, MainFocusNavigation.UP, complete, COLUMNS)));
+        button.setNextFocusDownId(focusId(MainFocusNavigation.target(
+                slotIndex, restore, MainFocusNavigation.DOWN, complete, COLUMNS)));
+    }
+
+    private int focusId(int target) {
+        return target == MainFocusNavigation.SETTINGS
+                ? settingsButton.getId() : actionButtons[target].getId();
     }
 
     private void requestSaveSlot(final int slot) {
@@ -428,98 +501,292 @@ public final class MainActivity extends Activity
             window.setAttributes(attributes);
             window.setLayout(dp(560), WindowManager.LayoutParams.WRAP_CONTENT);
         }
-        confirm.requestFocus();
+        cancel.requestFocus();
     }
 
-    private void saveSlot(int slot) {
+    private void saveSlot(final int slot) {
         if (!bridge.isConnected()) {
             showMessage("系统服务尚未连接");
             return;
         }
-        SharedPreferences.Editor editor = preferences.edit();
-        String primary = null;
-        try {
-            for (String key : ENV_KEYS) {
-                String value = bridge.getEnvironment(key);
-                boolean present = value != null;
-                editor.putBoolean(presentKey(slot, key), present);
-                if (present) {
-                    editor.putString(valueKey(slot, key), value);
-                } else {
-                    editor.remove(valueKey(slot, key));
+        beginHardwareOperation("●  正在保存“" + getSlotName(slot) + "”…");
+        hardwareExecutor.execute(new Runnable() {
+            @Override
+            public void run() {
+                String failure = null;
+                try {
+                    ProjectionPreset captured = captureHardwareState();
+                    String validationError = PresetIntegrity.validatePreset(captured);
+                    if (validationError != null) {
+                        throw new IllegalStateException(validationError);
+                    }
+                    SharedPreferences.Editor editor = preferences.edit();
+                    for (String key : ENV_KEYS) {
+                        boolean present = captured.environments.containsKey(key);
+                        editor.putBoolean(presentKey(slot, key), present);
+                        if (present) {
+                            editor.putString(valueKey(slot, key),
+                                    captured.environments.get(key));
+                        } else {
+                            editor.remove(valueKey(slot, key));
+                        }
+                    }
+                    editor.putString("slot." + slot + ".gmpf_full",
+                            captured.fullCoordinates);
+                    editor.putInt("slot." + slot + ".schema",
+                            PresetIntegrity.CURRENT_SCHEMA);
+                    editor.putLong("slot." + slot + ".saved_at",
+                            System.currentTimeMillis());
+                    if (!editor.commit()) {
+                        throw new IllegalStateException("预设无法写入本机存储");
+                    }
+                } catch (Exception error) {
+                    failure = describe(error);
                 }
-                if ("kst_ofs".equals(key)) {
-                    primary = value;
-                }
+                final String shownFailure = failure;
+                mainHandler.post(new Runnable() {
+                    @Override
+                    public void run() {
+                        finishSaveOperation(slot, shownFailure);
+                    }
+                });
             }
-            if (primary == null || primary.length() == 0 || "0".equals(primary)) {
-                setStatus("●  当前没有可保存的手动矫正数据", COLOR_AMBER);
-                showMessage("请先完成一次手动矫正");
-                return;
-            }
-            String fullCoordinates = gmpfBridge.capture();
-            editor.putString("slot." + slot + ".gmpf_full", fullCoordinates);
-            editor.putLong("slot." + slot + ".saved_at", System.currentTimeMillis());
-            editor.apply();
-            refreshSlot(slot);
-            setActionsEnabled(serviceConnected);
-            String name = getSlotName(slot);
-            setStatus("●  “" + name + "”已保存校正数据", COLOR_GREEN);
-            showMessage("已保存“" + name + "”");
-        } catch (RemoteException error) {
-            setStatus("●  保存失败：" + error.getMessage(), Color.rgb(255, 112, 112));
-        } catch (RuntimeException error) {
-            setStatus("●  保存校正数据失败：" + error.getMessage(),
-                    Color.rgb(255, 112, 112));
-        }
+        });
     }
 
-    private void restoreSlot(int slot) {
+    private void restoreSlot(final int slot) {
         if (!bridge.isConnected()) {
             showMessage("系统服务尚未连接");
             return;
         }
-        if (!hasCompleteSlot(slot)) {
+        final ProjectionPreset target = readStoredPreset(slot);
+        String validationError = PresetIntegrity.validateStored(
+                preferences.getInt("slot." + slot + ".schema", 0),
+                preferences.getLong("slot." + slot + ".saved_at", 0L), target);
+        if (validationError != null) {
             showMessage("“" + getSlotName(slot) + "”需要重新保存");
             return;
         }
-        try {
-            String targetOffsets = preferences.getString(valueKey(slot, "kst_ofs"), null);
-            String fullCoordinates = preferences.getString(
-                    "slot." + slot + ".gmpf_full", null);
-            setStatus("●  正在应用“" + getSlotName(slot) + "”…", COLOR_BLUE);
-            GmpfKeystoneBridge.ApplyResult result = gmpfBridge.apply(fullCoordinates);
-            if (!result.targetWasValid) {
-                throw new IllegalStateException(
-                        "校正数据校验失败；目标=" + result.requestedCorners);
-            }
-            if (!result.matches) {
-                throw new IllegalStateException(
-                        "硬件回读不一致；目标=" + result.requestedCorners
-                                + "，硬件=" + result.actualCorners);
-            }
-            for (String key : ENV_KEYS) {
-                if (preferences.getBoolean(presentKey(slot, key), false)) {
-                    String expected = preferences.getString(valueKey(slot, key), "");
-                    bridge.setEnvironment(key, expected);
-                    String actual = bridge.getEnvironment(key);
-                    if (!expected.equals(actual)) {
-                        throw new IllegalStateException(key + " 写入校验失败");
+        beginHardwareOperation("●  正在应用“" + getSlotName(slot) + "”…");
+        hardwareExecutor.execute(new Runnable() {
+            @Override
+            public void run() {
+                final ProjectionTransaction.Result result = ProjectionTransaction.execute(
+                        new ProjectionTransaction.Device() {
+                            @Override
+                            public ProjectionPreset capture() throws Exception {
+                                return captureHardwareState();
+                            }
+
+                            @Override
+                            public void apply(ProjectionPreset preset) throws Exception {
+                                applyHardwareState(preset);
+                            }
+
+                            @Override
+                            public void verify(ProjectionPreset preset) throws Exception {
+                                verifyHardwareState(preset);
+                            }
+                        }, target);
+                mainHandler.post(new Runnable() {
+                    @Override
+                    public void run() {
+                        finishRestoreOperation(slot, result);
                     }
-                }
+                });
             }
-            String finalOffsets = bridge.getEnvironment("kst_ofs");
-            if (targetOffsets == null || !targetOffsets.equals(finalOffsets)) {
-                throw new IllegalStateException("kst_ofs 环境回读不一致");
+        });
+    }
+
+    private ProjectionPreset captureHardwareState() throws RemoteException {
+        Map<String, String> environments = new LinkedHashMap<String, String>();
+        for (String key : ENV_KEYS) {
+            String value = bridge.getEnvironment(key);
+            if (value != null) {
+                environments.put(key, value);
             }
+        }
+        return new ProjectionPreset(gmpfBridge.capture(), environments);
+    }
+
+    private void applyHardwareState(ProjectionPreset preset) throws RemoteException {
+        GmpfKeystoneBridge.ApplyResult result = gmpfBridge.apply(preset.fullCoordinates);
+        if (!result.targetWasValid) {
+            throw new IllegalStateException("校正数据未通过系统校验");
+        }
+        if (!result.matches) {
+            throw new IllegalStateException("校正坐标硬件回读不一致");
+        }
+        for (String key : ENV_KEYS) {
+            if (preset.environments.containsKey(key)) {
+                bridge.setEnvironment(key, preset.environments.get(key));
+            }
+        }
+    }
+
+    private void verifyHardwareState(ProjectionPreset preset) throws RemoteException {
+        String actualCoordinates = gmpfBridge.capture();
+        if (!KeystoneDataValidator.sameActiveGrid(
+                preset.fullCoordinates, actualCoordinates)) {
+            throw new IllegalStateException("最终校正坐标硬件回读不一致");
+        }
+        for (Map.Entry<String, String> entry : preset.environments.entrySet()) {
+            String actual = bridge.getEnvironment(entry.getKey());
+            if (!entry.getValue().equals(actual)) {
+                throw new IllegalStateException(entry.getKey() + " 环境回读不一致");
+            }
+        }
+    }
+
+    private ProjectionPreset readStoredPreset(int slot) {
+        Map<String, String> environments = new LinkedHashMap<String, String>();
+        for (String key : ENV_KEYS) {
+            if (preferences.getBoolean(presentKey(slot, key), false)) {
+                environments.put(key, preferences.getString(valueKey(slot, key), ""));
+            }
+        }
+        return new ProjectionPreset(
+                preferences.getString("slot." + slot + ".gmpf_full", null), environments);
+    }
+
+    private void beginHardwareOperation(String status) {
+        operationRunning = true;
+        setStatus(status, COLOR_BLUE);
+        setActionsEnabled(false);
+    }
+
+    private void finishSaveOperation(int slot, String failure) {
+        operationRunning = false;
+        if (destroyed) {
+            finishBackgroundLifecycle();
+            return;
+        }
+        if (failure == null) {
+            refreshSlot(slot);
             String name = getSlotName(slot);
+            setStatus("●  “" + name + "”已保存校正数据", COLOR_GREEN);
+            showMessage("已保存“" + name + "”");
+        } else {
+            setStatus("●  保存失败：" + failure, Color.rgb(255, 112, 112));
+            showMessage("保存失败，请检查当前校正状态");
+        }
+        finishBackgroundLifecycle();
+    }
+
+    private void finishRestoreOperation(int slot, ProjectionTransaction.Result result) {
+        operationRunning = false;
+        if (destroyed) {
+            finishBackgroundLifecycle();
+            return;
+        }
+        String name = getSlotName(slot);
+        if (result.success) {
             setStatus("●  “" + name + "”已应用并通过硬件校验", COLOR_GREEN);
             showMessage("已应用“" + name + "”");
-        } catch (RemoteException error) {
-            setStatus("●  恢复失败：" + error.getMessage(), Color.rgb(255, 112, 112));
-        } catch (RuntimeException error) {
-            setStatus("●  应用失败：" + error.getMessage(), Color.rgb(255, 112, 112));
+        } else if (result.rollbackSucceeded) {
+            setStatus("●  应用失败，已恢复操作前的画面", COLOR_AMBER);
+            showMessage("应用失败，已自动恢复");
+        } else if (result.rollbackAttempted) {
+            setStatus("●  应用失败，自动恢复也未完成", Color.rgb(255, 112, 112));
+            showCriticalFailure(result);
+        } else {
+            setStatus("●  应用失败：" + describe(result.failure),
+                    Color.rgb(255, 112, 112));
+            showMessage("应用失败，画面未修改");
         }
+        finishBackgroundLifecycle();
+    }
+
+    private void finishBackgroundLifecycle() {
+        if (destroyed) {
+            bridge.close();
+            return;
+        }
+        if (disconnectWhenIdle || !activityStarted) {
+            bridge.disconnect();
+            disconnectWhenIdle = false;
+            serviceConnected = false;
+        }
+        if (!destroyed) {
+            setActionsEnabled(serviceConnected);
+        }
+    }
+
+    private void showCriticalFailure(ProjectionTransaction.Result result) {
+        String message = "应用预设时发生错误，自动恢复也没有通过校验。"
+                + "请打开系统手动校正界面检查画面。\n\n应用错误："
+                + describe(result.failure) + "\n恢复错误：" + describe(result.rollbackFailure);
+        new AlertDialog.Builder(this)
+                .setTitle("画面需要检查")
+                .setMessage(message)
+                .setPositiveButton("知道了", null)
+                .show();
+    }
+
+    private void beginConnect() {
+        if (operationRunning) {
+            return;
+        }
+        serviceConnected = false;
+        setActionsEnabled(false);
+        retryButton.setVisibility(View.GONE);
+        setStatus("●  正在连接极米显示服务…", COLOR_BLUE);
+        mainHandler.removeCallbacks(connectionTimeout);
+        mainHandler.postDelayed(connectionTimeout, CONNECTION_TIMEOUT_MS);
+        bridge.connect();
+        configureFocusNavigation();
+    }
+
+    private void showConnectionState(boolean connected, String message) {
+        serviceConnected = connected;
+        retryButton.setVisibility(connected ? View.GONE : View.VISIBLE);
+        setStatus(connected
+                        ? "●  设备已连接，可以保存或应用预设" : "●  " + message,
+                connected ? COLOR_GREEN : Color.rgb(255, 112, 112));
+        setActionsEnabled(connected);
+        configureFocusNavigation();
+        if (!connected && retryButton.isShown()) {
+            retryButton.requestFocus();
+        }
+    }
+
+    private void showCompatibilityWarningIfNeeded() {
+        final String model = Build.MODEL;
+        final String device = Build.DEVICE;
+        final String product = Build.PRODUCT;
+        final String display = Build.DISPLAY;
+        final String incremental = Build.VERSION.INCREMENTAL;
+        if (DeviceCompatibility.isTested(model, device, product, display, incremental)) {
+            return;
+        }
+        final String signature = String.valueOf(model) + "|" + String.valueOf(device)
+                + "|" + String.valueOf(display) + "|" + String.valueOf(incremental);
+        if (signature.equals(preferences.getString(PREF_COMPATIBILITY_ACK, ""))) {
+            return;
+        }
+        String message = "当前设备：" + DeviceCompatibility.deviceLabel(model, device)
+                + "\n系统版本：" + safeText(display)
+                + "\n\n本应用只在 XH25L / 5.0.0.30_375 上完成实机测试。"
+                + "当前环境可能可以使用，但请先备份重要设置。";
+        new AlertDialog.Builder(this)
+                .setTitle("当前设备尚未测试")
+                .setMessage(message)
+                .setPositiveButton("继续使用", (dialog, which) -> preferences.edit()
+                        .putString(PREF_COMPATIBILITY_ACK, signature).apply())
+                .show();
+    }
+
+    private String safeText(String value) {
+        return value == null || value.trim().length() == 0 ? "未知" : value.trim();
+    }
+
+    private String describe(Throwable error) {
+        if (error == null) {
+            return "未知错误";
+        }
+        String message = error.getMessage();
+        return message == null || message.trim().length() == 0
+                ? error.getClass().getSimpleName() : message;
     }
 
     private void refreshAllSlots() {
@@ -557,8 +824,10 @@ public final class MainActivity extends Activity
     }
 
     private boolean hasCompleteSlot(int slot) {
-        return preferences.contains("slot." + slot + ".saved_at")
-                && preferences.contains("slot." + slot + ".gmpf_full");
+        ProjectionPreset preset = readStoredPreset(slot);
+        return PresetIntegrity.validateStored(
+                preferences.getInt("slot." + slot + ".schema", 0),
+                preferences.getLong("slot." + slot + ".saved_at", 0L), preset) == null;
     }
 
     private String getSlotName(int slot) {
@@ -574,10 +843,15 @@ public final class MainActivity extends Activity
     }
 
     private void setActionsEnabled(boolean enabled) {
+        boolean actionsEnabled = enabled && !operationRunning;
         for (int slot = 1; slot <= SLOT_COUNT; slot++) {
-            actionButtons[(slot - 1) * 2].setEnabled(enabled);
+            actionButtons[(slot - 1) * 2].setEnabled(actionsEnabled);
             actionButtons[(slot - 1) * 2 + 1]
-                    .setEnabled(enabled && hasCompleteSlot(slot));
+                    .setEnabled(actionsEnabled && hasCompleteSlot(slot));
+        }
+        settingsButton.setEnabled(!operationRunning);
+        if (retryButton != null) {
+            retryButton.setEnabled(!operationRunning);
         }
         configureFocusNavigation();
     }

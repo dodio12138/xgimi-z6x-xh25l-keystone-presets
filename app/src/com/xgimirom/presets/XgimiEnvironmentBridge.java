@@ -7,6 +7,8 @@ import android.content.ServiceConnection;
 import android.os.IBinder;
 import android.os.Parcel;
 import android.os.RemoteException;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 
 final class XgimiEnvironmentBridge implements ServiceConnection {
     interface Listener {
@@ -35,8 +37,10 @@ final class XgimiEnvironmentBridge implements ServiceConnection {
     };
     private final Context context;
     private final Listener listener;
-    private IBinder commonBinder;
-    private boolean bound;
+    private final ExecutorService connectionExecutor = Executors.newFixedThreadPool(2);
+    private volatile IBinder commonBinder;
+    private volatile boolean bound;
+    private volatile int connectionGeneration;
 
     XgimiEnvironmentBridge(Context context, Listener listener) {
         this.context = context.getApplicationContext();
@@ -44,6 +48,7 @@ final class XgimiEnvironmentBridge implements ServiceConnection {
     }
 
     void connect() {
+        connectionGeneration++;
         Intent intent = new Intent();
         intent.setComponent(new ComponentName(SERVICE_PACKAGE, SERVICE_CLASS));
         try {
@@ -57,6 +62,7 @@ final class XgimiEnvironmentBridge implements ServiceConnection {
     }
 
     void disconnect() {
+        connectionGeneration++;
         commonBinder = null;
         if (bound) {
             context.unbindService(this);
@@ -64,28 +70,60 @@ final class XgimiEnvironmentBridge implements ServiceConnection {
         }
     }
 
+    void close() {
+        disconnect();
+        connectionExecutor.shutdownNow();
+    }
+
     boolean isConnected() {
         return commonBinder != null && commonBinder.isBinderAlive();
     }
 
     @Override
-    public void onServiceConnected(ComponentName name, IBinder service) {
-        try {
-            commonBinder = getCommonBinder(service);
-            boolean connected = isConnected();
-            listener.onConnectionChanged(
-                    connected,
-                    connected ? "已连接极米系统服务" : "系统服务未返回 Common 接口");
-        } catch (RemoteException error) {
-            commonBinder = null;
-            listener.onConnectionChanged(false, "读取系统服务失败: " + error.getMessage());
-        }
+    public void onServiceConnected(ComponentName name, final IBinder service) {
+        final int generation = connectionGeneration;
+        connectionExecutor.execute(new Runnable() {
+            @Override
+            public void run() {
+                try {
+                    IBinder resolved = getCommonBinder(service);
+                    if (generation != connectionGeneration || !bound) {
+                        return;
+                    }
+                    commonBinder = resolved;
+                    boolean connected = isConnected();
+                    listener.onConnectionChanged(
+                            connected,
+                            connected ? "已连接极米系统服务"
+                                    : "系统服务未返回 Common 接口");
+                } catch (RemoteException | RuntimeException error) {
+                    if (generation != connectionGeneration) {
+                        return;
+                    }
+                    commonBinder = null;
+                    listener.onConnectionChanged(
+                            false, "读取系统服务失败: " + describe(error));
+                }
+            }
+        });
     }
 
     @Override
     public void onServiceDisconnected(ComponentName name) {
         commonBinder = null;
         listener.onConnectionChanged(false, "极米系统服务已断开");
+    }
+
+    @Override
+    public void onBindingDied(ComponentName name) {
+        commonBinder = null;
+        listener.onConnectionChanged(false, "极米系统服务绑定已失效");
+    }
+
+    @Override
+    public void onNullBinding(ComponentName name) {
+        commonBinder = null;
+        listener.onConnectionChanged(false, "极米系统服务没有返回可用接口");
     }
 
     String getEnvironment(String key) throws RemoteException {
@@ -95,7 +133,11 @@ final class XgimiEnvironmentBridge implements ServiceConnection {
         try {
             data.writeInterfaceToken(COMMON_DESCRIPTOR);
             data.writeString(key);
-            commonBinder.transact(TRANSACTION_GET_ENVIRONMENT, data, reply, 0);
+            boolean handled = commonBinder.transact(
+                    TRANSACTION_GET_ENVIRONMENT, data, reply, 0);
+            if (!handled) {
+                throw new RemoteException("系统服务不支持读取环境参数");
+            }
             reply.readException();
             return reply.readString();
         } finally {
@@ -112,7 +154,11 @@ final class XgimiEnvironmentBridge implements ServiceConnection {
             data.writeInterfaceToken(COMMON_DESCRIPTOR);
             data.writeString(key);
             data.writeString(value);
-            commonBinder.transact(TRANSACTION_SET_ENVIRONMENT, data, reply, 0);
+            boolean handled = commonBinder.transact(
+                    TRANSACTION_SET_ENVIRONMENT, data, reply, 0);
+            if (!handled) {
+                throw new RemoteException("系统服务不支持写入环境参数");
+            }
             reply.readException();
         } finally {
             reply.recycle();
@@ -121,7 +167,7 @@ final class XgimiEnvironmentBridge implements ServiceConnection {
     }
 
     void applyKeystoneOffsets(String kstOfs) throws RemoteException {
-        int[] stored = parseKeystoneOffsets(kstOfs);
+        int[] stored = KeystoneOffsetParser.parse(kstOfs);
 
         // kst_ofs is stored by the MStar trapezoid server in this order:
         // LB.x, LB.y, RB.x, RB.y, RT.x, RT.y, LT.x, LT.y.
@@ -160,42 +206,15 @@ final class XgimiEnvironmentBridge implements ServiceConnection {
         }
     }
 
-    private int[] parseKeystoneOffsets(String value) {
-        if (value == null || value.length() == 0 || "0".equals(value)) {
-            throw new IllegalArgumentException("预设 kst_ofs 为空");
-        }
-        String[] raw = value.split(",", -1);
-        int[] parsed = new int[9];
-        int count = 0;
-        for (String item : raw) {
-            String trimmed = item.trim();
-            if (trimmed.length() == 0) {
-                continue;
-            }
-            if (count >= parsed.length) {
-                break;
-            }
-            try {
-                parsed[count] = Integer.parseInt(trimmed);
-            } catch (NumberFormatException error) {
-                throw new IllegalArgumentException("kst_ofs 含有无效整数: " + trimmed);
-            }
-            count++;
-        }
-        if (count < 9) {
-            throw new IllegalArgumentException("kst_ofs 不是校验值加 8 个角点");
-        }
-        int[] offsets = new int[8];
-        System.arraycopy(parsed, 1, offsets, 0, offsets.length);
-        return offsets;
-    }
-
     private IBinder getCommonBinder(IBinder service) throws RemoteException {
         Parcel data = Parcel.obtain();
         Parcel reply = Parcel.obtain();
         try {
             data.writeInterfaceToken(XGIMI_SERVICE_DESCRIPTOR);
-            service.transact(TRANSACTION_GET_COMMON, data, reply, 0);
+            boolean handled = service.transact(TRANSACTION_GET_COMMON, data, reply, 0);
+            if (!handled) {
+                throw new RemoteException("极米系统服务不支持 Common 接口");
+            }
             reply.readException();
             return reply.readStrongBinder();
         } finally {
@@ -208,5 +227,11 @@ final class XgimiEnvironmentBridge implements ServiceConnection {
         if (!isConnected()) {
             throw new RemoteException("XGIMI service is not connected");
         }
+    }
+
+    private static String describe(Throwable error) {
+        String message = error.getMessage();
+        return message == null || message.length() == 0
+                ? error.getClass().getSimpleName() : message;
     }
 }

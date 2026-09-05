@@ -8,5 +8,14 @@
         <service
             android:name=".services.XgimiServices"
             android:exported="true" />
+        <receiver
+            android:name=".services.MockControlReceiver"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="com.xgimi.xgimiservice.mock.RESET" />
+                <action android:name="com.xgimi.xgimiservice.mock.SET_SCENARIO" />
+                <action android:name="com.xgimi.xgimiservice.mock.SET_ENV" />
+            </intent-filter>
+        </receiver>
     </application>
 </manifest>

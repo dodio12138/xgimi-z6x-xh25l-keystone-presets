@@ -55,10 +55,20 @@ done
 rm -rf "$build_dir/classes" "$build_dir/dex" "$build_dir/apk-extra"
 mkdir -p "$classes_dir" "$dex_dir" "$project_dir/outputs"
 
+# Compile app resources explicitly before linking. Raw aapt2 does not scan
+# app/res when invoked with only --manifest, so launcher vectors would
+# otherwise be absent from the APK resource table.
+resources_zip="$build_dir/resources.zip"
+rm -f "$resources_zip"
+"$build_tools/aapt2" compile \
+  --dir "$project_dir/app/res" \
+  -o "$resources_zip"
+
 "$build_tools/aapt2" link \
   -o "$build_dir/base-unsigned.apk" \
   --manifest "$project_dir/app/AndroidManifest.xml" \
   -I "$android_jar" \
+  -R "$resources_zip" \
   --min-sdk-version 26 \
   --target-sdk-version 26
 
@@ -68,7 +78,14 @@ mkdir -p "$classes_dir" "$dex_dir" "$project_dir/outputs"
   -d "$classes_dir" \
   "$project_dir/app/src/com/xgimirom/presets/MainActivity.java" \
   "$project_dir/app/src/com/xgimirom/presets/SettingsActivity.java" \
+  "$project_dir/app/src/com/xgimirom/presets/DeviceCompatibility.java" \
   "$project_dir/app/src/com/xgimirom/presets/GmpfKeystoneBridge.java" \
+  "$project_dir/app/src/com/xgimirom/presets/KeystoneDataValidator.java" \
+  "$project_dir/app/src/com/xgimirom/presets/KeystoneOffsetParser.java" \
+  "$project_dir/app/src/com/xgimirom/presets/MainFocusNavigation.java" \
+  "$project_dir/app/src/com/xgimirom/presets/PresetIntegrity.java" \
+  "$project_dir/app/src/com/xgimirom/presets/ProjectionPreset.java" \
+  "$project_dir/app/src/com/xgimirom/presets/ProjectionTransaction.java" \
   "$project_dir/app/src/com/xgimirom/presets/XgimiEnvironmentBridge.java"
 
 "$jar_bin" cf "$build_dir/classes.jar" -C "$classes_dir" .

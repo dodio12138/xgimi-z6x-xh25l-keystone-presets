@@ -21,7 +21,10 @@
 - 自定义预设名称
 - 显示保存时间和槽位状态
 - 单独开关保存、应用前的确认窗口
-- 支持 Android TV 遥控器操作
+- 连接失败时可手动重连
+- 应用失败时尝试恢复操作前的画面
+- 检测设备和系统版本，未测试环境只提示、不禁止使用
+- 支持 Android TV 遥控器焦点导航和启动器图标、横幅
 - 不需要 Root，也不会修改系统分区
 
 ## 使用
@@ -54,6 +57,14 @@ export JAVA_HOME=/path/to/jdk
 默认使用 Android Platform `android-36.1` 和 Build Tools `36.0.0`，也可以通过 `ANDROID_PLATFORM` 和 `ANDROID_BUILD_TOOLS_VERSION` 修改。
 
 构建结果位于 `outputs/`。其中 `.apk1` 与 `.apk` 内容相同，供会隐藏 APK 文件的投影仪文件管理器使用。
+
+运行纯 Java 单元测试：
+
+```bash
+./scripts/test.sh
+```
+
+模拟器可切换成功、连接超时、写入失败和回读不一致等场景，用法见 [`tools/emulator/README.md`](tools/emulator/README.md)。
 
 ## 安装
 

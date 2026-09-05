@@ -1,8 +1,8 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
     package="com.xgimirom.presets"
-    android:versionCode="10"
-    android:versionName="0.9.1">
+    android:versionCode="11"
+    android:versionName="0.10.0">
 
     <uses-sdk android:minSdkVersion="26" android:targetSdkVersion="26" />
     <uses-feature android:name="android.software.leanback" android:required="false" />
@@ -10,8 +10,10 @@
 
     <application
         android:allowBackup="false"
+        android:banner="@drawable/banner_tv"
         android:extractNativeLibs="true"
-        android:label="极米矫正预设"
+        android:icon="@drawable/ic_launcher_tv"
+        android:label="极米校正预设"
         android:theme="@android:style/Theme.Material.NoActionBar">
         <activity
             android:name=".MainActivity"

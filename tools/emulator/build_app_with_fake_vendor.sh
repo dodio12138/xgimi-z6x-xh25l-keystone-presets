@@ -2,14 +2,18 @@
 
 set -euo pipefail
 
-fixture_dir="$(cd "$(dirname "$0")" && pwd)"
-project_dir="$(cd "$fixture_dir/../../.." && pwd)"
+tool_dir="$(cd "$(dirname "$0")" && pwd)"
+project_dir="$(cd "$tool_dir/../.." && pwd)"
 sdk_dir="${ANDROID_SDK_ROOT:-${ANDROID_HOME:-}}"
 build_tools_version="${ANDROID_BUILD_TOOLS_VERSION:-36.0.0}"
 android_platform="${ANDROID_PLATFORM:-android-36.1}"
 build_tools="$sdk_dir/build-tools/$build_tools_version"
 android_jar="$sdk_dir/platforms/$android_platform/android.jar"
-build_dir="$project_dir/build/mock-xgimi-service"
+build_dir="$project_dir/build/emulator-app"
+classes_dir="$build_dir/classes"
+dex_dir="$build_dir/dex"
+compiled_res_dir="$build_dir/compiled-res"
+output_apk="$build_dir/xh25l-keystone-presets-emulator.apk"
 keystore="$project_dir/build/debug.keystore"
 sources_file="$build_dir/sources.txt"
 
@@ -36,33 +40,53 @@ for required in "$build_tools/aapt2" "$build_tools/d8" \
   fi
 done
 
+for command_path in "$javac_bin" "$jar_bin" "$keytool_bin"; do
+  if [[ -z "$command_path" || ! -x "$command_path" ]]; then
+    echo "error: JDK tools were not found; set JAVA_HOME to a JDK" >&2
+    exit 1
+  fi
+done
+
 rm -rf "$build_dir"
-mkdir -p "$build_dir/classes" "$build_dir/dex"
-find "$fixture_dir/src" -name '*.java' -print | sort > "$sources_file"
+mkdir -p "$classes_dir" "$dex_dir" "$compiled_res_dir"
+{
+  find "$project_dir/app/src" -name '*.java' -print
+  find "$tool_dir/fake-xgimi-vendor/src" -name '*.java' -print
+} | sort > "$sources_file"
+for resource in "$project_dir"/app/res/drawable/*.xml; do
+  "$build_tools/aapt2" compile -o "$compiled_res_dir" "$resource"
+done
+resource_args=()
+for compiled_resource in "$compiled_res_dir"/*.flat; do
+  resource_args+=(-R "$compiled_resource")
+done
 
 "$build_tools/aapt2" link \
-  -o "$build_dir/base.apk" \
-  --manifest "$fixture_dir/AndroidManifest.xml" \
+  -o "$build_dir/base-unsigned.apk" \
+  --manifest "$project_dir/app/AndroidManifest.xml" \
   -I "$android_jar" \
+  "${resource_args[@]}" \
   --min-sdk-version 26 \
-  --target-sdk-version 36
+  --target-sdk-version 26
 
 "$javac_bin" \
   --release 8 \
   -classpath "$android_jar" \
-  -d "$build_dir/classes" \
+  -d "$classes_dir" \
   @"$sources_file"
 
-"$jar_bin" cf "$build_dir/classes.jar" -C "$build_dir/classes" .
+"$jar_bin" cf "$build_dir/classes.jar" -C "$classes_dir" .
 "$build_tools/d8" --release --min-api 26 \
-  --output "$build_dir/dex" "$build_dir/classes.jar"
-cp "$build_dir/base.apk" "$build_dir/with-dex.apk"
+  --output "$dex_dir" "$build_dir/classes.jar"
+cp "$build_dir/base-unsigned.apk" "$build_dir/with-dex-unsigned.apk"
 (
-  cd "$build_dir/dex"
-  zip -q "$build_dir/with-dex.apk" classes.dex
+  cd "$dex_dir"
+  zip -q "$build_dir/with-dex-unsigned.apk" classes.dex
 )
 "$build_tools/zipalign" -f 4 \
-  "$build_dir/with-dex.apk" "$build_dir/aligned.apk"
+  "$build_dir/with-dex-unsigned.apk" \
+  "$build_dir/aligned-unsigned.apk"
+
 if [[ ! -f "$keystore" ]]; then
   "$keytool_bin" -genkeypair \
     -keystore "$keystore" \
@@ -72,15 +96,16 @@ if [[ ! -f "$keystore" ]]; then
     -keyalg RSA \
     -keysize 2048 \
     -validity 10000 \
-    -dname "CN=XH25L Emulator Mock,O=Local,C=GB" \
+    -dname "CN=XH25L Emulator App,O=Local,C=GB" \
     -noprompt
 fi
+
 "$build_tools/apksigner" sign \
   --ks "$keystore" \
   --ks-pass pass:android \
   --key-pass pass:android \
-  --out "$build_dir/mock-xgimi-service.apk" \
-  "$build_dir/aligned.apk"
+  --out "$output_apk" \
+  "$build_dir/aligned-unsigned.apk"
 
-"$build_tools/apksigner" verify --verbose "$build_dir/mock-xgimi-service.apk"
-echo "$build_dir/mock-xgimi-service.apk"
+"$build_tools/apksigner" verify --verbose "$output_apk"
+echo "$output_apk"
