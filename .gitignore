@@ -1,0 +1,37 @@
+# macOS / editors
+.DS_Store
+*.swp
+*.swo
+.idea/
+.vscode/
+
+# Local device credentials and signing material
+.adb-*/
+*.keystore
+*.jks
+*.idsig
+
+# Build products and screenshots
+/build/
+/outputs/
+*.apk
+*.apk1
+
+# Copyrighted XGIMI firmware and extracted proprietary artifacts
+/firmware/
+/local-vendor/*
+!/local-vendor/README.md
+*.bin
+*.img
+*.raw.img
+*.dex
+*.odex
+*.vdex
+*.so
+
+# Locally downloaded reverse-engineering tools and caches
+/tools/xgimi-bin-tools/
+/tools/vdexExtractor/
+/tools/merge_sparse_fragments.py
+__pycache__/
+*.pyc
